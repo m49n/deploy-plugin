@@ -45,6 +45,8 @@ class Servers extends SettingsController
         'install' => '/plugins/rainlab/deploy/models/server/fields_install.yaml',
         'privkey' => '/plugins/rainlab/deploy/models/server/fields_privkey.yaml',
         'env_config' => '/plugins/rainlab/deploy/models/server/fields_env_config.yaml',
+        'shell_script' => '/plugins/rainlab/deploy/models/server/fields_shell_script.yaml',
+        'upgrade_legacy' => '/plugins/rainlab/deploy/models/server/fields_upgrade_legacy.yaml',
     ];
 
     /**
@@ -80,6 +82,17 @@ class Servers extends SettingsController
     }
 
     /**
+     * update action
+     */
+    public function update($recordId = null)
+    {
+        $this->addJs('/plugins/rainlab/deploy/assets/js/servers.js', 'RainLab.Deploy');
+        $this->addJs('/plugins/rainlab/deploy/assets/vendor/forge/forge.min.js', 'RainLab.Deploy');
+
+        return $this->asExtension('FormController')->update($recordId);
+    }
+
+    /**
      * manage action
      */
     public function manage($recordId = null)
@@ -97,6 +110,10 @@ class Servers extends SettingsController
 
             case $model::STATUS_UNREACHABLE:
                 $context = 'manage_download';
+                break;
+
+            case $model::STATUS_LEGACY:
+                $context = 'manage_legacy';
                 break;
 
             default:
@@ -153,7 +170,6 @@ class Servers extends SettingsController
         $widget = $this->formWidgetInstances['env_config'];
 
         try {
-
             $response = $widget->model->transmitScript('get_env_file');
 
             $envContents = $response['contents'] ?? null;
@@ -169,7 +185,7 @@ class Servers extends SettingsController
             $this->handleError($ex);
         }
 
-        $this->vars['actionTitle'] = 'Update Server Config';
+        $this->vars['actionTitle'] = 'Update Environment Variables';
         $this->vars['actionHandler'] = 'onSaveEnvConfig';
         $this->vars['submitText'] = 'Save Config';
         $this->vars['closeText'] = 'Cancel';
@@ -179,7 +195,7 @@ class Servers extends SettingsController
     }
 
     /**
-     * manage_onSaveEnvConfig
+     * manage_onSaveEnvConfig saves environment variables
      */
     public function manage_onSaveEnvConfig($serverId)
     {
@@ -199,6 +215,56 @@ class Servers extends SettingsController
         ];
 
         return $this->deployerWidget->executeSteps($serverId, $deployActions);
+    }
+
+    /**
+     * manage_onLoadRunShell shows the shell script form
+     */
+    public function manage_onLoadRunShell()
+    {
+        $widget = $this->formWidgetInstances['shell_script'];
+
+        $lastScript = $widget->model->deploy_preferences['last_shell_script'] ?? "echo 'Hello World';";
+
+        $widget->setFormValues(['shell_script' => $lastScript]);
+
+        $this->vars['actionTitle'] = 'Run Console Script';
+        $this->vars['actionHandler'] = 'onRunShellScript';
+        $this->vars['submitText'] = 'Run';
+        $this->vars['closeText'] = 'Close';
+        $this->vars['widget'] = $widget;
+
+        return $this->makePartial('shell_form');
+    }
+
+    /**
+     * manage_onRunShellScript runs a shell script
+     */
+    public function manage_onRunShellScript()
+    {
+        $widget = $this->formWidgetInstances['shell_script'];
+        $model = $widget->model;
+
+        // Save preferences
+        $model->setDeployPreferences('last_shell_script', post('shell_script'));
+        $model->save();
+
+        try {
+            $response = $model->transmitShell(post('shell_script'));
+            $output = $response['output'] ?? '';
+            $output = base64_decode($output);
+        }
+        catch (Exception $ex) {
+            $output = $ex->getMessage();
+        }
+
+        $widget->setFormValues([
+            'shell_output' => $output
+        ]);
+
+        $fieldObject = $widget->getField('shell_output');
+
+        return ['#'.$fieldObject->getId('group') => $widget->makePartial('field', ['field' => $fieldObject])];
     }
 
     /**
@@ -222,7 +288,7 @@ class Servers extends SettingsController
     }
 
     /**
-     * manage_onSaveEnvConfig
+     * manage_onSaveDeployToServer deploys selected objects to the server
      */
     public function manage_onSaveDeployToServer($serverId)
     {
@@ -236,13 +302,36 @@ class Servers extends SettingsController
         // Create deployment chain
         $deployActions = [];
         $useFiles = [];
-        $useFiles[] = $this->buildArchiveDeployStep($deployActions, 'Core', 'buildCoreModules');
-        $useFiles[] = $this->buildArchiveDeployStep($deployActions, 'Vendor', 'buildVendorPackages');
+
+        if (post('deploy_core')) {
+            $useFiles[] = $this->buildArchiveDeployStep($deployActions, 'Core', 'buildCoreModules');
+            $useFiles[] = $this->buildArchiveDeployStep($deployActions, 'Vendor', 'buildVendorPackages');
+        }
+
+        if (post('deploy_config')) {
+            $useFiles[] = $this->buildArchiveDeployStep($deployActions, 'Config', 'buildConfigFiles');
+        }
+
+        if ($plugins = post('plugins')) {
+            $useFiles[] = $this->buildArchiveDeployStep($deployActions, 'Plugins', 'buildPluginsBundle', [(array) $plugins]);
+        }
+
+        if ($themes = post('themes')) {
+            $useFiles[] = $this->buildArchiveDeployStep($deployActions, 'Themes', 'buildThemesBundle', [(array) $themes]);
+        }
+
+        if (count($useFiles)) {
+            $deployActions[] = [
+                'label' => 'Extracting Files',
+                'action' => 'extractFiles',
+                'files' => $useFiles
+            ];
+        }
 
         $deployActions[] = [
-            'label' => 'Extracting Files',
-            'action' => 'extractFiles',
-            'files' => $useFiles
+            'label' => 'Clearing Cache',
+            'action' => 'transmitScript',
+            'script' => 'clear_cache'
         ];
 
         $deployActions[] = [
@@ -250,6 +339,14 @@ class Servers extends SettingsController
             'action' => 'transmitArtisan',
             'artisan' => 'october:migrate'
         ];
+
+        if (post('deploy_core')) {
+            $deployActions[] = [
+                'label' => 'Setting Build Number',
+                'action' => 'transmitArtisan',
+                'artisan' => 'october:util set build'
+            ];
+        }
 
         $deployActions[] = [
             'label' => 'Finishing Up',
@@ -290,7 +387,7 @@ class Servers extends SettingsController
     }
 
     /**
-     * manage_onSaveInstallToServer
+     * manage_onSaveInstallToServer runs the installation process
      */
     public function manage_onSaveInstallToServer($serverId)
     {
@@ -311,12 +408,28 @@ class Servers extends SettingsController
         // Create deployment chain
         $deployActions = [];
 
+        $deployActions[] = [
+            'label' => 'Checking Database Config',
+            'action' => 'transmitScript',
+            'script' => 'check_database',
+            'vars' => [
+                'type' => post('db_type'),
+                'host' => post('db_host'),
+                'port' => post('db_port'),
+                'name' => post('db_type') === 'sqlite' ? post('db_filename') : post('db_name'),
+                'user' => post('db_user'),
+                'pass' => post('db_pass')
+            ]
+        ];
+
         $envContents = ArchiveBuilder::instance()->buildEnvContents($envValues);
         $deployActions[] = [
             'label' => 'Saving Configuration Values',
             'action' => 'transmitScript',
             'script' => 'put_env_file',
-            'vars' => ['contents' => $envContents]
+            'vars' => [
+                'contents' => $envContents
+            ]
         ];
 
         $useFiles = [];
@@ -330,10 +443,75 @@ class Servers extends SettingsController
             'files' => $useFiles
         ];
 
+        $projectKey = \System\Models\Parameter::get('system::project.key');
+        $deployActions[] = [
+            'label' => 'Saving Configuration Values',
+            'action' => 'transmitScript',
+            'script' => 'put_project_key',
+            'vars' => [
+                'project' => $projectKey
+            ]
+        ];
+
         $deployActions[] = [
             'label' => 'Migrating Database',
             'action' => 'transmitArtisan',
             'artisan' => 'october:migrate'
+        ];
+
+        $deployActions[] = [
+            'label' => 'Setting Build Number',
+            'action' => 'transmitArtisan',
+            'artisan' => 'october:util set build'
+        ];
+
+        $deployActions[] = [
+            'label' => 'Finishing Up',
+            'action' => 'final',
+            'files' => $useFiles
+        ];
+
+        return $this->deployerWidget->executeSteps($serverId, $deployActions);
+    }
+
+
+    /**
+     * manage_onLoadUpgradeLegacy upgrades a legacy version
+     */
+    public function manage_onLoadUpgradeLegacy()
+    {
+        $widget = $this->formWidgetInstances['upgrade_legacy'];
+
+        $this->vars['actionTitle'] = 'Upgrade Config';
+        $this->vars['actionHandler'] = 'onRunUpgradeLegacy';
+        $this->vars['submitText'] = 'Run';
+        $this->vars['closeText'] = 'Close';
+        $this->vars['widget'] = $widget;
+
+        return $this->makePartial('action_form');
+    }
+
+    /**
+     * manage_onRunUpgradeLegacy deploys selected objects to the server
+     */
+    public function manage_onRunUpgradeLegacy($serverId)
+    {
+        // Create deployment chain
+        $deployActions = [];
+
+        $useFiles = [];
+        $useFiles[] = $this->buildArchiveDeployStep($deployActions, 'Legacy', 'buildLegacyBundle');
+
+        $deployActions[] = [
+            'label' => 'Extracting Files',
+            'action' => 'extractFiles',
+            'files' => $useFiles
+        ];
+
+        $deployActions[] = [
+            'label' => 'Upgrading Legacy Site',
+            'action' => 'transmitArtisan',
+            'artisan' => 'october:env'
         ];
 
         $deployActions[] = [
@@ -346,9 +524,9 @@ class Servers extends SettingsController
     }
 
     /**
-     * buildArchiveDeployStep
+     * buildArchiveDeployStep builds a single archive step used for deployment
      */
-    protected function buildArchiveDeployStep(&$steps, $typeLabel, $buildFunc): string
+    protected function buildArchiveDeployStep(&$steps, string $typeLabel, string $buildFunc, array $funcArgs = []): string
     {
         $fileId = md5(uniqid());
         $filePath = temp_path("ocbl-${fileId}.arc");
@@ -357,7 +535,7 @@ class Servers extends SettingsController
             'label' => __('Building :type Archive', ['type' => $typeLabel]),
             'action' => 'archiveBuilder',
             'func' => $buildFunc,
-            'args' => [$filePath]
+            'args' => array_merge([$filePath], $funcArgs)
         ];
 
         $steps[] = [
@@ -378,30 +556,22 @@ class Servers extends SettingsController
             throw new ApplicationException('Could not find server');
         }
 
-        $wantCode = null;
+        $statusDiffers = $server->testBeacon();
 
-        try {
-            $response = $server->transmit('healthCheck');
-            $isInstalled = $response['appInstalled'] ?? false;
-            $wantCode = $isInstalled ? $server::STATUS_ACTIVE : $server::STATUS_READY;
-            Flash::success('Beacon is alive!');
-        }
-        catch (Exception $ex) {
-            $wantCode = $server::STATUS_UNREACHABLE;
+        if ($server->status_code === $server::STATUS_UNREACHABLE) {
             Flash::warning('Could not contact beacon');
         }
+        else {
+            Flash::success('Beacon is alive!');
+        }
 
-        // Status differs
-        if ($wantCode !== null && $wantCode !== $server->status_code) {
-            $server->status_code = $wantCode;
-            $server->save();
-
+        if ($statusDiffers) {
             return Redirect::refresh();
         }
     }
 
     /**
-     * makeAllFormWidgets
+     * makeAllFormWidgets generates all form widgets used by the controller
      */
     protected function makeAllFormWidgets()
     {
@@ -413,6 +583,8 @@ class Servers extends SettingsController
             $config = $this->makeConfig(base_path($definition));
 
             $config->model = $server;
+
+            $config->alias = Str::camel($key);
 
             $widget = $this->makeWidget(\Backend\Widgets\Form::class, $config);
 

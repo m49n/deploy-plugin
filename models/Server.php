@@ -15,6 +15,7 @@ class Server extends Model
 
     const STATUS_ACTIVE = 'active';
     const STATUS_READY = 'ready';
+    const STATUS_LEGACY = 'legacy';
     const STATUS_UNREACHABLE = 'unreachable';
 
     /**
@@ -63,9 +64,52 @@ class Server extends Model
     }
 
     /**
+     * getStatusLabelAttribute shows a human version of status code
+     */
+    public function getStatusLabelAttribute()
+    {
+        return title_case($this->status_code);
+    }
+
+    /**
+     * testBeacon and return true if the status differs
+     */
+    public function testBeacon(): bool
+    {
+        $wantCode = null;
+
+        try {
+            $response = $this->transmit('healthCheck');
+            $isInstalled = $response['appInstalled'] ?? false;
+            $envFound = $response['envFound'] ?? false;
+            if ($isInstalled && !$envFound) {
+                $wantCode = static::STATUS_LEGACY;
+            }
+            elseif (!$isInstalled) {
+                $wantCode = static::STATUS_READY;
+            }
+            else {
+                $wantCode = static::STATUS_ACTIVE;
+            }
+        }
+        catch (Exception $ex) {
+            $wantCode = static::STATUS_UNREACHABLE;
+        }
+
+        // Status differs
+        if ($wantCode !== null && $wantCode !== $this->status_code) {
+            $this->status_code = $wantCode;
+            $this->save();
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
      * setDeployPreferences manages the deployment preferences as a multidimensional array
      */
-    public function setDeployPreferences(string $key, array $data)
+    public function setDeployPreferences(string $key, $data)
     {
         $this->deploy_preferences = [$key => $data] + (array) $this->deploy_preferences;
     }
@@ -91,11 +135,22 @@ class Server extends Model
     }
 
     /**
+     * transmitShell command to the server
+     */
+    public function transmitShell($contents): array
+    {
+        $scriptContents = base64_encode($contents);
+
+        return $this->transmit('shellScript', ['script' => $scriptContents]);
+    }
+
+    /**
      * transmitFile to the server
      */
     public function transmitFile(string $filePath, array $params = []): array
     {
         $response = Http::post($this->buildUrl('fileUpload', $params), function($http) use ($filePath) {
+            $http->maxRedirects = 0;
             $http->dataFile('file', $filePath);
             $http->data('filename', md5($filePath));
             $http->data('filehash', md5_file($filePath));
@@ -123,8 +178,29 @@ class Server extends Model
             traceLog($response);
         }
 
-        if ($response->code !== 201) {
-            throw new ApplicationException('A Beacon could not be found at the specified address');
+        // Request size too large
+        if ($response->code === 413) {
+            throw new ApplicationException('Server did not accept the upload (Request too large)');
+        }
+
+        // Redirects seem to drop the POST variables and this is a security precaution
+        if (in_array($response->code, [301, 302])) {
+            $redirectTo = array_get($response->info, 'redirect_url');
+            $redirectTo = explode("?", $redirectTo)[0];
+            throw new ApplicationException(
+                'Server responded with redirect ('.$redirectTo.')'
+                . ' please update the server address to exactly this and try again.'
+            );
+        }
+
+        if ($response->code !== 201 && $response->code !== 400) {
+            throw new ApplicationException(
+                'A valid response from a beacon was not found.'
+                . ' '
+                . 'Add ?debug=1 to your URL, try again and check the logs'
+                . ' '
+                . '(Code: '.$response->code.')'
+            );
         }
 
         $body = json_decode($response->body, true);
@@ -134,7 +210,7 @@ class Server extends Model
         }
 
         if (!is_array($body)) {
-            throw new ApplicationException('Invalid object from Beacon');
+            throw new ApplicationException('Empty response from beacon');
         }
 
         return $body;

@@ -17,8 +17,8 @@ defaultRedirect: rainlab/deploy/servers
 # Create page
 create:
     title: backend::lang.form.create_title
-    redirect: rainlab/deploy/servers/update/:id
-    redirectClose: rainlab/deploy/servers
+    redirect: rainlab/deploy/servers/manage/:id
+    redirectClose: rainlab/deploy/servers/manage/:id
 
 # Update page
 update:
@@ -35,3 +35,6 @@ manage_download:
 
 manage_install:
     form: $/rainlab/deploy/models/server/fields_manage_install.yaml
+
+manage_legacy:
+    form: $/rainlab/deploy/models/server/fields_manage_legacy.yaml

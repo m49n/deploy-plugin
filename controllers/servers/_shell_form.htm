@@ -19,10 +19,9 @@
             <?php if (isset($submitText)): ?>
                 <button
                     type="submit"
-                    data-dismiss="popup"
-                    data-control="popup"
-                    data-handler="<?= e($actionHandler) ?>"
-                    data-keyboard="false"
+                    data-request="<?= e($actionHandler) ?>"
+                    data-hotkey="ctrl+enter, cmd+enter"
+                    data-stripe-load-indicator
                     class="btn btn-primary">
                     <?= e(__($submitText)) ?>
                 </button>

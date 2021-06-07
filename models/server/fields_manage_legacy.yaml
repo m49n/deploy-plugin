@@ -5,16 +5,12 @@
 fields:
     _tip1:
         type: hint
-        mode: success
-        label: Server is Ready to Deploy
+        mode: info
+        label: A Legacy Version of October CMS is Detected
 
-    _action_deploy:
+    _action_action_convert_legacy:
         type: partial
-        path: action_deploy
-
-    _action_update_config:
-        type: partial
-        path: action_update_config
+        path: action_convert_legacy
 
     _action_run_shell:
         type: partial
